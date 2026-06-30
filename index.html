@@ -135,12 +135,29 @@ textarea{width:100%;min-height:130px;resize:vertical;line-height:1.6;background:
   </div>
   <div class="topright">
     <div class="live-pill" id="live-pill"><span></span>Live data</div>
-    <div id="api-counter" style="display:none;align-items:center;gap:5px;font-size:11px;padding:4px 10px;border-radius:12px;border:0.5px solid var(--bd);background:var(--s1);color:var(--tm)"><i class="ti ti-gauge" style="font-size:12px"></i><span id="api-counter-text">0/25 calls today</span></div>
+    <div id="api-counter" style="display:none;align-items:center;gap:5px;font-size:11px;padding:4px 10px;border-radius:12px;border:0.5px solid var(--bd);background:var(--s1);color:var(--tm)"><i class="ti ti-gauge" style="font-size:12px"></i><span id="api-counter-text">0 calls today</span></div>
+    <button onclick="toggleDataSources(this)" style="display:flex;align-items:center;gap:5px;font-size:12px"><i class="ti ti-plug-connected" style="font-size:13px"></i>Data sources</button>
+  </div>
+</div>
+
+<div id="data-sources-panel" style="display:none;background:var(--s2);border:0.5px solid var(--bd);border-radius:12px;padding:1rem 1.25rem;margin-bottom:1.25rem">
+  <div class="ct"><i class="ti ti-plug-connected" style="font-size:15px"></i>Data sources -- automatic failover</div>
+  <p class="hint" style="margin-bottom:1rem">Ray Copilot tries each provider in order. If one hits its daily limit, it automatically moves to the next -- only falls back to simulated data if all three are exhausted.</p>
+  <div class="row" style="margin-bottom:0">
     <div class="ig">
-      <label>Alpha Vantage API key</label>
-      <input type="password" id="apikey" placeholder="Paste your free key here" style="width:210px" />
+      <label>1. Alpha Vantage <span style="color:var(--tm);font-weight:400">(25/day)</span></label>
+      <input type="password" id="apikey" placeholder="Paste key here" style="width:210px" />
+    </div>
+    <div class="ig">
+      <label>2. Twelve Data <span style="color:var(--tm);font-weight:400">(800/day)</span></label>
+      <input type="password" id="apikey-td" placeholder="Paste key here" style="width:210px" />
+    </div>
+    <div class="ig">
+      <label>3. Finnhub <span style="color:var(--tm);font-weight:400">(~thousands/day)</span></label>
+      <input type="password" id="apikey-fh" placeholder="Paste key here" style="width:210px" />
     </div>
   </div>
+  <p class="hint">Get free keys: <a href="https://www.alphavantage.co/support/#api-key" target="_blank">Alpha Vantage</a> &middot; <a href="https://twelvedata.com" target="_blank">Twelve Data</a> &middot; <a href="https://finnhub.io" target="_blank">Finnhub</a> -- all instant, email only, no credit card.</p>
 </div>
 
 <div id="event-alert" style="display:none;border-radius:12px;padding:14px 18px;margin-bottom:1.25rem;border-left:4px solid"></div>
@@ -522,6 +539,14 @@ function simCloses(ticker) {
   return closes;
 }
 
+function getKeyTD() {
+  return G('apikey-td').value.trim();
+}
+
+function getKeyFH() {
+  return G('apikey-fh').value.trim();
+}
+
 function buildApiUrl(ticker, market, key) {
   if (market === 'CRYPTO') {
     return 'https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=' + ticker + '&market=USD&apikey=' + key;
@@ -532,8 +557,22 @@ function buildApiUrl(ticker, market, key) {
     var quote = pair.substring(3, 6);
     return 'https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=' + base + '&to_symbol=' + quote + '&outputsize=compact&apikey=' + key;
   }
-  // ASX, US, COMMODITY, INDEX all use the standard equity/ETF daily endpoint
   return 'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=' + ticker + '&outputsize=compact&apikey=' + key;
+}
+
+function buildApiUrlTD(ticker, market, key) {
+  var symbol = ticker;
+  if (market === 'FOREX') symbol = ticker.substring(0,3) + '/' + ticker.substring(3,6);
+  return 'https://api.twelvedata.com/time_series?symbol=' + symbol + '&interval=1day&outputsize=100&apikey=' + key;
+}
+
+function buildApiUrlFH(ticker, market, key) {
+  var symbol = ticker;
+  if (market === 'CRYPTO') symbol = 'BINANCE:' + ticker + 'USDT';
+  if (market === 'FOREX') symbol = 'OANDA:' + ticker.substring(0,3) + '_' + ticker.substring(3,6);
+  var to = Math.floor(Date.now() / 1000);
+  var from = to - (100 * 86400);
+  return 'https://finnhub.io/api/v1/stock/candle?symbol=' + symbol + '&resolution=D&from=' + from + '&to=' + to + '&token=' + key;
 }
 
 function parseApiResponse(j, market) {
@@ -569,75 +608,115 @@ function parseApiResponse(j, market) {
   return closes;
 }
 
-function getApiCallCount() {
+function parseApiResponseTD(j) {
+  if (!j.values || !j.values.length) return null;
+  var rows = j.values.slice().reverse();
+  var closes = [];
+  for (var i = 0; i < rows.length; i++) closes.push(parseFloat(rows[i].close));
+  return closes;
+}
+
+function parseApiResponseFH(j) {
+  if (!j.c || j.s !== 'ok' || !j.c.length) return null;
+  return j.c.map(function(v) { return parseFloat(v); });
+}
+
+function getApiCallCount(provider) {
   var todayKey = new Date().toDateString();
-  var raw = localStorage.getItem('rc_api_calls');
+  var raw = localStorage.getItem('rc_api_calls_' + provider);
   if (!raw) return 0;
   var data = JSON.parse(raw);
   if (data.date !== todayKey) return 0;
   return data.count;
 }
 
-function incrementApiCallCount() {
+function incrementApiCallCount(provider) {
   var todayKey = new Date().toDateString();
-  var count = getApiCallCount() + 1;
-  localStorage.setItem('rc_api_calls', JSON.stringify({date: todayKey, count: count}));
+  var count = getApiCallCount(provider) + 1;
+  localStorage.setItem('rc_api_calls_' + provider, JSON.stringify({date: todayKey, count: count}));
   updateApiCounterDisplay();
   return count;
 }
+
+var PROVIDER_LIMITS = {av: 25, td: 800, fh: 9999};
 
 function updateApiCounterDisplay() {
   var el = G('api-counter');
   var textEl = G('api-counter-text');
   if (!el || !textEl) return;
-  var count = getApiCallCount();
-  var key = getKey();
-  if (!key) { el.style.display = 'none'; return; }
+  var avC = getApiCallCount('av');
+  var tdC = getApiCallCount('td');
+  var fhC = getApiCallCount('fh');
+  var totalC = avC + tdC + fhC;
+  var hasAnyKey = getKey() || getKeyTD() || getKeyFH();
+  if (!hasAnyKey) { el.style.display = 'none'; return; }
   el.style.display = 'flex';
-  textEl.textContent = count + '/25 calls today';
-  if (count >= 25) {
-    el.style.background = 'var(--br)';
-    el.style.borderColor = 'var(--er)';
-    el.style.color = 'var(--tr)';
-    textEl.textContent = count + '/25 calls today -- limit reached';
-  } else if (count >= 20) {
-    el.style.background = 'var(--bw)';
-    el.style.borderColor = 'var(--ew)';
-    el.style.color = 'var(--tw)';
+  var avMax = avC >= PROVIDER_LIMITS.av;
+  var tdMax = tdC >= PROVIDER_LIMITS.td;
+  var fhMax = fhC >= PROVIDER_LIMITS.fh;
+  textEl.textContent = totalC + ' calls today (AV ' + avC + '/25, TD ' + tdC + '/800)';
+  if (avMax && tdMax && fhMax) {
+    el.style.background = 'var(--br)'; el.style.borderColor = 'var(--er)'; el.style.color = 'var(--tr)';
+    textEl.textContent = 'All providers exhausted today';
+  } else if (avMax && tdMax) {
+    el.style.background = 'var(--bw)'; el.style.borderColor = 'var(--ew)'; el.style.color = 'var(--tw)';
+    textEl.textContent = totalC + ' calls -- on Finnhub now';
+  } else if (avMax) {
+    el.style.background = 'var(--bw)'; el.style.borderColor = 'var(--ew)'; el.style.color = 'var(--tw)';
+    textEl.textContent = totalC + ' calls -- on Twelve Data now';
   } else {
-    el.style.background = 'var(--s1)';
-    el.style.borderColor = 'var(--bd)';
-    el.style.color = 'var(--tm)';
+    el.style.background = 'var(--s1)'; el.style.borderColor = 'var(--bd)'; el.style.color = 'var(--tm)';
   }
+}
+
+function tryAlphaVantage(ticker, market, callback) {
+  var key = getKey();
+  if (!key || getApiCallCount('av') >= PROVIDER_LIMITS.av) { callback(null); return; }
+  var url = buildApiUrl(ticker, market, key);
+  incrementApiCallCount('av');
+  fetch(url).then(function(r) { return r.json(); }).then(function(j) {
+    var closes = parseApiResponse(j, market);
+    callback(closes && closes.length > 5 ? closes : null);
+  }).catch(function() { callback(null); });
+}
+
+function tryTwelveData(ticker, market, callback) {
+  var key = getKeyTD();
+  if (!key || getApiCallCount('td') >= PROVIDER_LIMITS.td) { callback(null); return; }
+  var url = buildApiUrlTD(ticker, market, key);
+  incrementApiCallCount('td');
+  fetch(url).then(function(r) { return r.json(); }).then(function(j) {
+    var closes = parseApiResponseTD(j);
+    callback(closes && closes.length > 5 ? closes : null);
+  }).catch(function() { callback(null); });
+}
+
+function tryFinnhub(ticker, market, callback) {
+  var key = getKeyFH();
+  if (!key) { callback(null); return; }
+  var url = buildApiUrlFH(ticker, market, key);
+  incrementApiCallCount('fh');
+  fetch(url).then(function(r) { return r.json(); }).then(function(j) {
+    var closes = parseApiResponseFH(j);
+    callback(closes && closes.length > 5 ? closes : null);
+  }).catch(function() { callback(null); });
 }
 
 function fetchCloses(ticker, market, callback) {
   if (typeof market === 'function') { callback = market; market = 'US'; }
-  var key = getKey();
-  if (!key) {
-    callback(simCloses(ticker), false);
-    return;
-  }
-  if (getApiCallCount() >= 25) {
-    callback(simCloses(ticker), false);
-    return;
-  }
-  var url = buildApiUrl(ticker, market, key);
-  incrementApiCallCount();
-  fetch(url)
-    .then(function(r) { return r.json(); })
-    .then(function(j) {
-      var closes = parseApiResponse(j, market);
-      if (closes && closes.length > 5) {
-        callback(closes, true);
-      } else {
+
+  tryAlphaVantage(ticker, market, function(closes) {
+    if (closes) { callback(closes, true); return; }
+    tryTwelveData(ticker, market, function(closes2) {
+      if (closes2) { callback(closes2, true); return; }
+      tryFinnhub(ticker, market, function(closes3) {
+        if (closes3) { callback(closes3, true); return; }
         callback(simCloses(ticker), false);
-      }
-    })
-    .catch(function() {
-      callback(simCloses(ticker), false);
+      });
     });
+  });
 }
+
 
 function sigIcon(s) {
   if (s >= 2) return '<i class="ti ti-circle-check" style="color:var(--tg)"></i>';
@@ -1749,13 +1828,32 @@ function renderEventAlert() {
     + '</div>';
 }
 
+function toggleDataSources(btn) {
+  var panel = G('data-sources-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
 function init() {
   var saved = localStorage.getItem('rc_key');
   if (saved) G('apikey').value = saved;
+  var savedTD = localStorage.getItem('rc_key_td');
+  if (savedTD) G('apikey-td').value = savedTD;
+  var savedFH = localStorage.getItem('rc_key_fh');
+  if (savedFH) G('apikey-fh').value = savedFH;
 
   G('apikey').addEventListener('input', function() {
     var k = this.value.trim();
     if (k.length > 10) localStorage.setItem('rc_key', k);
+    updateApiCounterDisplay();
+  });
+  G('apikey-td').addEventListener('input', function() {
+    var k = this.value.trim();
+    if (k.length > 10) localStorage.setItem('rc_key_td', k);
+    updateApiCounterDisplay();
+  });
+  G('apikey-fh').addEventListener('input', function() {
+    var k = this.value.trim();
+    if (k.length > 10) localStorage.setItem('rc_key_fh', k);
     updateApiCounterDisplay();
   });
 
